@@ -1,15 +1,5 @@
 #include "BD3WS.h"
 
-void initialize(int argc, char** argv);
-void finalize(int exit_code);
-void process_CLA(int argc, char** argv);
-void setup_socket();
-void extract_connection_information();
-int accept_client();
-void process_client_request(char* file_path, char* content_type);
-void send_file(const char* file_name, const char* content_type);
-void prepare_response_header(const char* content_type, char* response_header);
-
 int main(int argc, char **argv)
 {
 	char file_path[BD3WS_MaxLengthData];
@@ -239,9 +229,11 @@ void process_client_request(char* file_path, char* content_type)
 void send_file(const char* file_name, const char* content_type)
 {
 	FILE* file_handle = NULL;
+	struct stat file_stat;
 	char file_path[BD3WS_MaxLengthData];
 	char buffer[BD3WS_MaxLengthData];
 	char response_header[BD3WS_MaxLengthData];
+	int bytes_read = 0;
 
 	memset(buffer, 0, sizeof(buffer));
 	memset(response_header, 0, sizeof(response_header));
@@ -255,36 +247,57 @@ void send_file(const char* file_name, const char* content_type)
 	file_handle = fopen(file_path, "r");
 	//
 
-	// Check file existence.
+	// Check file existence to create proper response header.
 	if (NULL == file_handle)
 	{
 		fprintf(stderr, "(%s | Error): Could not serve file: \"%s\"!\n", BD3WS_ServerName, file_path);
+		response_state = 404;
+	}
+	else
+	{
+		response_state = 200;
+	}
+	//
+
+	// If HTTP 404 occurs, serve error 404 page.
+	if (404 == response_state)
+	{
+		strcpy(file_path, BD3WS_FileHTTP404);
+		file_handle = fopen(file_path, "r");
+	}
+	//
+
+	stat(file_path, &file_stat);
+
+	prepare_response_header(&file_stat, content_type, response_header);
+
+	// Send response header to client.
+	if (-1 == send(client.socket, response_header, strlen(response_header), 0))
+	{
+		fprintf(stderr, "(%s | Error): Could not send response header to client!\n", BD3WS_ServerName);
 		return;
 	}
 	//
 
-	prepare_response_header(content_type, response_header);
-
-	// Send response header to client.
-	if (-1 == send(client.socket, response_header, BD3WS_MaxLengthData, 0))
-	{
-		fprintf(stderr, "(%s | Error): Could not send repsonse header to client!\n", BD3WS_ServerName);
-		finalize(1);
-	}
-	//
-
-	// Read requested file and send it to client.
+	// Read file and send it to client.
 	while(!feof(file_handle))
 	{
 		// Read requested file data.
-		fread(buffer, 1, BD3WS_MaxLengthData, file_handle);
+		bytes_read = fread(buffer, 1, BD3WS_MaxLengthData, file_handle);
+		//
+
+		// If there are no more bytes to read, quit serving file.
+		if (0 >= bytes_read)
+		{
+			break;
+		}
 		//
 
 		// Send requested file data to client.
 		if(-1 == send(client.socket, buffer, BD3WS_MaxLengthData, 0))
 		{
 			fprintf(stderr, "(%s | Error): Could not send file data to client!\n", BD3WS_ServerName);
-			finalize(1);
+			break;
 		}
 		//
 
@@ -293,21 +306,53 @@ void send_file(const char* file_name, const char* content_type)
 	//
 
 	fclose(file_handle);
+
+	fprintf(stdout, "(%s | Information): File sent successfully!\n", BD3WS_ServerName);
 }
 
-void prepare_response_header(const char* content_type, char* response_header)
+void prepare_response_header(struct stat* file_stat, const char* content_type, char* response_header)
 {
-	strcat(response_header, HTTP_200_OK);
+	prepare_response_header_state(response_header);
+
 	strcat(response_header, "\n");
 	strcat(response_header, "Server: ");
 	strcat(response_header, BD3WS_ServerName);
 	strcat(response_header, "\n");
+
+	prepare_response_header_content(file_stat, content_type, response_header);
+
+	strcat(response_header, "\n\n");
+
+	fprintf(stdout, "\tResponse Header:\n%s", response_header);
+	fprintf(stdout, "\n===========================================================\n");
+	fflush(stdout);
+}
+
+void prepare_response_header_state(char* response_header)
+{
+	// Determine HTTP response state of requested file.
+	if (200 == response_state)
+	{
+		strcat(response_header, HTTP_200_OK);
+	}
+	else if (404 == response_state)
+	{
+		strcat(response_header, HTTP_404_NOTFOUND);
+	}
+	//
+}
+
+void prepare_response_header_content(struct stat* file_stat, const char* content_type, char* response_header)
+{
+	char file_size[16];
+
 	strcat(response_header, "Content-Type: ");
 
 	// Content-Type: text/plain
 	if (0 == strcmp(CONTENT_TEXT_PLAIN, content_type))
 	{
 		strcat(response_header, CONTENT_TEXT_PLAIN);
+		strcat(response_header, ";charset=UTF-8");
 	}
 	//
 
@@ -315,6 +360,7 @@ void prepare_response_header(const char* content_type, char* response_header)
 	else if (0 == strcmp(CONTENT_TEXT_HTML, content_type))
 	{
 		strcat(response_header, CONTENT_TEXT_HTML);
+		strcat(response_header, ";charset=UTF-8");
 	}
 	//
 
@@ -332,8 +378,41 @@ void prepare_response_header(const char* content_type, char* response_header)
 	}
 	//
 
-	strcat(response_header, "\n\n");
+	// Content-Type: image/jpeg
+	else if (0 == strcmp(CONTENT_IMAGE_JPEG, content_type))
+	{
+		strcat(response_header, CONTENT_IMAGE_JPEG);
+	}
+	//
 
-	fprintf(stdout, "\tResponse Header:\n%s", response_header);
-	fflush(stdout);
+	// Content-Type: image/x-icon
+	else if (0 == strcmp(CONTENT_IMAGE_XICON, content_type))
+	{
+		strcat(response_header, CONTENT_IMAGE_XICON);
+	}
+	//
+
+	// Content-Tye: audio/ogg
+	else if (0 == strcmp(CONTENT_AUDIO_OGG, content_type))
+	{
+		strcat(response_header, CONTENT_AUDIO_OGG);
+	}
+	//
+
+	// Content-Type: video/webm
+	else if (0 == strcmp(CONTENT_VIDEO_WEBM, content_type))
+	{
+		strcat(response_header, CONTENT_VIDEO_WEBM);
+	}
+	//
+
+	// Content-Type: */*
+	else
+	{
+		strcat(response_header, CONTENT_ANY);
+	}
+
+	sprintf(file_size, "%d", file_stat->st_size);
+	strcat(response_header, "\nContent-Length: ");
+	strcat(response_header, file_size);
 }
