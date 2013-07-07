@@ -84,6 +84,7 @@ void initialize(int argc, char** argv)
 
 	// Extract server connection information.
 	extract_connection_information();
+	//
 
 	// Setup server socket and bind it to a port.
 	setup_socket();
