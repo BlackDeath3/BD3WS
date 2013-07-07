@@ -1,58 +1,75 @@
+/******************************************************************************
+BD3WS: BlackDeath3 Web Server
+BD3WS.h
+******************************************************************************/
+
 #include "BD3WS.h"
 
+/******************************************************************************
+		main: Initializes the program and enters the main accept/response loop.
+******************************************************************************/
 int main(int argc, char **argv)
 {
-	char file_path[BD3WS_MaxLengthData];
-	char content_type[BD3WS_MaxLengthData];
+	char buffer[BD3WS_MaxLengthData];
+	int client = -1;
 
-	memset(file_path, 0, sizeof(file_path));
-	memset(content_type, 0, sizeof(content_type));
+	memset(buffer, 0, sizeof(buffer));
 
 	// Server start up.
 	initialize(argc, argv);
 	//
 
-	// Begin listening on the socket.
-	listen(server.socket, 3);
-	fprintf(stdout, "(%s | Information): Listening on %s:%hu\n", BD3WS_ServerName, server.ip, server.port);
-	//
-
-	// Flush output buffers before accepting any connections.
-	fflush(stdout);
-	fflush(stderr);
-	//
-
 	// Server main loop.
 	while(1)
 	{
-		// Accept connection request from client.
-		if(1 != accept_client())
+		// Accept connection request from client or continue looping.
+		client = accept_client();
+		if(-1 == client)
 		{
 			continue;
 		}
 		//
 
-		// Receive file data request from client.
-		process_client_request(&file_path, &content_type);
-		//
+		// Spawn a thread to handle incoming client request.
+		if (0 != pthread_create(&(server.clients[client].thread), NULL, handle_client_request, client))
+		{
+			sprintf(buffer, "(%s | Error): Error creating thread!", BD3WS_ServerName);
+			log(buffer, 1);
+		}
+		else
+		{
+			// Print thread "ID".
+			sprintf(buffer, "Thread ID: %d\n", server.clients[client]);
+			log(buffer, 0);
+			//
 
-		// Send requested file data to client.
-		send_file(&file_path, &content_type);
+			// Detach thread so that it will free itself after it has finished.
+			pthread_detach(server.clients[client].thread);
+			//
 
-		// Close connection socket.
-		close(client.socket);
+			client = -1;
+		}
 		//
 	}
 	//
-
-	// Server shut down.
-	finalize(0);
-	//
 }
 
+/******************************************************************************
+		initialize: Initializes the program by setting up structs and sockets,
+	parsing command-line arguments, and listening for client connections.
+******************************************************************************/
 void initialize(int argc, char** argv)
 {
-	fprintf(stdout, "(%s | Information): Initializing...\n", BD3WS_ServerName);
+	char buffer[BD3WS_MaxLengthData];
+
+	memset(buffer, 0, sizeof(buffer));
+
+	// Open log file.
+	log_handle = fopen(BD3WS_Log, "w");
+	//
+
+	sprintf(buffer, "(%s | Information): Initializing...\n", BD3WS_ServerName);
+	log(buffer, 0);
 
 	// Set initial server configuration.
 	memset(&(server.hints), 0, sizeof(server.hints));
@@ -75,16 +92,44 @@ void initialize(int argc, char** argv)
 	// Finished with the server information structure.
 	freeaddrinfo(server.info);
 	//
+
+	// Initialize client occupany states.
+	for (int i = 0; i < BD3WS_MaxNumberClients; ++i)
+	{
+		server.clients[i].occupied = 0;
+	}
+	//
+
+	// Ignore broken pipes.
+	signal(SIGPIPE, SIG_IGN);
+	//
+
+	// Begin listening on the socket.
+	listen(server.socket, 3);
+	sprintf(buffer, "(%s | Information): Listening on %s:%hu\n", BD3WS_ServerName, server.ip, server.port);
+	log(buffer, 0);
+	//
 }
 
+/******************************************************************************
+		finalize: Performs program shutdown tasks before exiting.
+******************************************************************************/
 void finalize(int exit_code)
 {
-	fprintf(stdout, "(%s | Information): Finalizing...\n", BD3WS_ServerName);
+	char buffer[BD3WS_MaxLengthData];
 
-	// Close connection socket.
-	if (-1 != client.socket)
+	memset(buffer, 0, sizeof(buffer));
+
+	sprintf(buffer, "(%s | Information): Finalizing...\n", BD3WS_ServerName);
+	log(buffer, 0);
+
+	// Close connection sockets.
+	for (int i = 0; i < BD3WS_MaxNumberClients; ++i)
 	{
-		close(client.socket);
+		if (-1 != server.clients[i].socket)
+		{
+			close(server.clients[i].socket);
+		}
 	}
 	//
 
@@ -95,15 +140,30 @@ void finalize(int exit_code)
 	}
 	//
 
-	exit(exit_code);
-}
+	// Close log file.
+	if (NULL != log_handle)
+	{
+		fclose(log_handle);
+	}
+	//
 
+	exit(exit_code);
+}	
+
+/******************************************************************************
+		process_CLA: Parses program command-line arguments.
+******************************************************************************/
 void process_CLA(int argc, char** argv)
 {
+	char buffer[BD3WS_MaxLengthData];
+
+	memset(buffer, 0, sizeof(buffer));
+
 	// Return address information for the specified hostname and service.
 	if(3 == argc && 0 != getaddrinfo(argv[1], argv[2], &(server.hints), &(server.info)))
 	{
-		fprintf(stderr, "(%s | Error): Could not get specified address information!\n", BD3WS_ServerName);
+		sprintf(buffer, "(%s | Error): Cannot get specified address information!\n", BD3WS_ServerName);
+		log(buffer, 1);
 		finalize(1);
 	}
 	//
@@ -111,12 +171,17 @@ void process_CLA(int argc, char** argv)
 	// Return address information for the default hostname and service.
 	else if(3 > argc && 0 != getaddrinfo(BD3WS_DefaultIP, BD3WS_DefaultPort, &(server.hints), &(server.info)))
 	{
-		fprintf(stderr, "(%s | Error): Could not get default address information!\n", BD3WS_ServerName);
+		sprintf(buffer, "(%s | Error): Cannot get default address information!\n", BD3WS_ServerName);
+		log(buffer, 1);
 		finalize(1);
 	}
 	//
 }
 
+/******************************************************************************
+		extract_connection_information: Extracts information pertaining to
+	the server-client connection (server IP address and port, etc.).
+******************************************************************************/
 void extract_connection_information()
 {
 	struct sockaddr_in* address;
@@ -130,10 +195,15 @@ void extract_connection_information()
 
 void setup_socket()
 {
+	char buffer[BD3WS_MaxLengthData];
+
+	memset(buffer, 0, sizeof(buffer));
+
 	// Get a server socket descriptor.
 	if(0 > (server.socket = socket(server.info->ai_family, server.info->ai_socktype, server.info->ai_protocol)))
 	{
-		fprintf(stderr, "(%s | Error): Invalid server socket descriptor!\n", BD3WS_ServerName);
+		sprintf(buffer, "(%s | Error): Invalid server socket descriptor!\n", BD3WS_ServerName);
+		log(buffer, 1);
 		finalize(1);
 	}
 	//
@@ -141,44 +211,121 @@ void setup_socket()
 	// Associate socket with port.
 	if(-1 == bind(server.socket, server.info->ai_addr, server.info->ai_addrlen))
 	{
-		fprintf(stderr, "(%s | Error): Could not bind to socket!\n", BD3WS_ServerName);
+		sprintf(buffer, "(%s | Error): Cannot bind to socket!\n", BD3WS_ServerName);
+		log(buffer, 1);
 		finalize(1);
 	}
 	//
 }
 
+/******************************************************************************
+		acccept_client: Waits on client requests and sets up server-client
+	connections upon receiving them.
+******************************************************************************/
 int accept_client()
 {
-	// Get a connection socket descriptor or restart the loop.
-	client.address_size = sizeof(client.address_storage);
-	if(-1 == (client.socket = accept(server.socket, (struct sockaddr *)&(client.address_storage), &(client.address_size))))
+	char buffer[BD3WS_MaxLengthData];
+	int i = 0;
+
+	memset(buffer, 0, sizeof(buffer));
+
+	// Get a connection socket descriptor.
+	for (i = 0; i < BD3WS_MaxNumberClients; ++i)
 	{
-		fprintf(stderr, "(%s | Error): Invalid connection socket descriptor!\n", BD3WS_ServerName);
-		return 0;
+		// Find vacant client.
+		if (0 == server.clients[i].occupied)
+		{
+			// Secure client structure.
+			server.clients[i].occupied = 1;
+			//
+
+			// Wait on client connection.
+			server.clients[i].address_size = sizeof(server.clients[i].address_storage);
+			if(-1 == (server.clients[i].socket = accept(server.socket, (struct sockaddr *)&(server.clients[i].address_storage), &(server.clients[i].address_size))))
+			{
+				sprintf(buffer, "(%s | Error): Invalid connection socket descriptor!\n", BD3WS_ServerName);
+				log(buffer, 1);
+				return -1;
+			}
+			sprintf(buffer, "(%s | Information): Accepted connection request from client.\n", BD3WS_ServerName);
+			log(buffer, 0);
+			break;
+			//
+		}
+		//
 	}
-	fprintf(stdout, "(%s | Information): Accepted connection request from client.\n", BD3WS_ServerName);
 	//
 
-	return 1;
+	// Return occupied client's index in server's client array.
+	return i;
+	//
 }
 
-void process_client_request(char* file_path, char* content_type)
+/******************************************************************************
+		handle_client_request: Upon receiving a client request, the server
+	spawns a thread. The thread's main task is to execute this function, which
+	parses incoming client requests and responds to them accordingly. Before
+	returning, connection sockets are closed and client structures are vacated
+	for future tasks.
+******************************************************************************/
+void* handle_client_request(void* client)
 {
+	char file_path[BD3WS_MaxLengthData];
+	char content_type[BD3WS_MaxLengthData];
+
+	memset(file_path, 0, sizeof(file_path));
+	memset(content_type, 0, sizeof(content_type));
+
+	pthread_mutex_lock(&mutex_client_request);
+
+	// Receive file data request from client.
+	parse_client_request((int)client, &file_path, &content_type);
+	//
+
+	// Send requested file data to client.
+	send_server_response((int)client, &file_path, &content_type);
+	//
+
+	// Close connection socket.
+	if (-1 != server.clients[(int)client].socket)
+	{
+		close(server.clients[(int)client].socket);
+	}
+	//
+
+	// Vacate client.
+	server.clients[(int)client].occupied = 0;
+	//
+
+	pthread_mutex_unlock(&mutex_client_request);
+}
+
+/******************************************************************************
+		parse_client_request: Parses incoming client request to determine an
+	appropriate server response.
+******************************************************************************/
+void parse_client_request(int client, char* file_path, char* content_type)
+{
+	char buffer[BD3WS_MaxLengthData];
 	char request[BD3WS_MaxLengthData];
 	char line_file[BD3WS_MaxLengthData];
 	char line_type[BD3WS_MaxLengthData];
 	char* token = NULL;
 
+	memset(buffer, 0, sizeof(buffer));
 	memset(request, 0, sizeof(request));
 
 	// Attempt to receive a client request.
-	if(-1 != recv(client.socket, request, BD3WS_MaxLengthData, 0))
+	if(-1 != recv(server.clients[client].socket, request, BD3WS_MaxLengthData, 0))
 	{
-		fprintf(stdout, "\n\t\t\tClient Request");
-		fprintf(stdout, "\n===========================================================\n");
-		fprintf(stdout, "%s\n", request);
-		fprintf(stdout, "\n===========================================================\n");
-		fflush(stdout);
+		// Print client request.
+		strcat(buffer, "\n===========================================================\n");
+		strcat(buffer, "\t\t\tClient Request: ");
+		strcat(buffer, "\n===========================================================\n");
+		sprintf((buffer + strlen(buffer)), "%s\n", request);
+		strcat(buffer, "\n===========================================================\n");
+		log(buffer, 0);
+		//
 
 		token = strtok(request, "\n");
 
@@ -226,7 +373,13 @@ void process_client_request(char* file_path, char* content_type)
 	//
 }
 
-void send_file(const char* file_name, const char* content_type)
+/******************************************************************************
+		send_server_response: Sends server response to client request. This
+	involves checking the requested file for existence and validity, building
+	an HTTP response header, filling the response body, and sending it through
+	the client connection.
+******************************************************************************/
+void send_server_response(int client, const char* file_name, const char* content_type)
 {
 	FILE* file_handle = NULL;
 	struct stat file_stat;
@@ -239,8 +392,18 @@ void send_file(const char* file_name, const char* content_type)
 	memset(response_header, 0, sizeof(response_header));
 
 	// Create full file path.
-	strcpy(file_path, BD3WS_RootDirectory);
+	strcpy(file_path, BD3WS_PublicDirectory);
 	strcat(file_path, file_name);
+	//
+
+	stat(file_path, &file_stat);
+
+	// If requested file is a directory.
+	if (S_ISDIR(file_stat.st_mode))
+	{
+		strcat(file_path, "/index.html");
+		stat(file_path, &file_stat);
+	}
 	//
 
 	// Open file.
@@ -250,31 +413,32 @@ void send_file(const char* file_name, const char* content_type)
 	// Check file existence to create proper response header.
 	if (NULL == file_handle)
 	{
-		fprintf(stderr, "(%s | Error): Could not serve file: \"%s\"!\n", BD3WS_ServerName, file_path);
-		response_state = 404;
+		sprintf(buffer, "(%s | Error): Cannot serve file: \"%s\"!\n", BD3WS_ServerName, file_path);
+		log(buffer, 1);
+		server.response_state = NOTFOUND;
 	}
 	else
 	{
-		response_state = 200;
+		server.response_state = OK;
 	}
 	//
 
 	// If HTTP 404 occurs, serve error 404 page.
-	if (404 == response_state)
+	if (NOTFOUND == server.response_state)
 	{
 		strcpy(file_path, BD3WS_FileHTTP404);
 		file_handle = fopen(file_path, "r");
+		stat(file_path, &file_stat);
 	}
 	//
 
-	stat(file_path, &file_stat);
-
-	prepare_response_header(&file_stat, content_type, response_header);
+	build_response_header(&file_stat, content_type, response_header);
 
 	// Send response header to client.
-	if (-1 == send(client.socket, response_header, strlen(response_header), 0))
+	if (-1 == send(server.clients[client].socket, response_header, strlen(response_header), 0))
 	{
-		fprintf(stderr, "(%s | Error): Could not send response header to client!\n", BD3WS_ServerName);
+		sprintf(buffer, "(%s | Error): Cannot send response header to client!\n", BD3WS_ServerName);
+		log(buffer, 1);
 		return;
 	}
 	//
@@ -294,10 +458,12 @@ void send_file(const char* file_name, const char* content_type)
 		//
 
 		// Send requested file data to client.
-		if(-1 == send(client.socket, buffer, BD3WS_MaxLengthData, 0))
+		if(-1 == send(server.clients[client].socket, buffer, BD3WS_MaxLengthData, 0))
 		{
-			fprintf(stderr, "(%s | Error): Could not send file data to client!\n", BD3WS_ServerName);
-			break;
+			sprintf(buffer, "(%s | Error): Cannot send file data to client!\n", BD3WS_ServerName);
+			log(buffer, 1);
+			fclose(file_handle);
+			return;
 		}
 		//
 
@@ -307,44 +473,66 @@ void send_file(const char* file_name, const char* content_type)
 
 	fclose(file_handle);
 
-	fprintf(stdout, "(%s | Information): File sent successfully!\n", BD3WS_ServerName);
+	sprintf(buffer, "(%s | Information): File sent successfully!\n", BD3WS_ServerName);
+	log(buffer, 0);
 }
 
-void prepare_response_header(struct stat* file_stat, const char* content_type, char* response_header)
+/******************************************************************************
+		build_response_header: Constructs the HTTP response header that will
+	be sent to a client.
+******************************************************************************/
+void build_response_header(struct stat* file_stat, const char* content_type, char* response_header)
 {
-	prepare_response_header_state(response_header);
+	char buffer[BD3WS_MaxLengthData];
+
+	memset(buffer, 0, sizeof(buffer));
+
+	build_response_header_state(response_header);
 
 	strcat(response_header, "\n");
 	strcat(response_header, "Server: ");
 	strcat(response_header, BD3WS_ServerName);
 	strcat(response_header, "\n");
 
-	prepare_response_header_content(file_stat, content_type, response_header);
+	build_response_header_content(file_stat, content_type, response_header);
 
 	strcat(response_header, "\n\n");
 
-	fprintf(stdout, "\tResponse Header:\n%s", response_header);
-	fprintf(stdout, "\n===========================================================\n");
-	fflush(stdout);
+	strcat(buffer, "\n===========================================================\n");
+	strcat(buffer, "\t\t\tServer Response Header:");
+	strcat(buffer, "\n===========================================================\n");
+	strcat(buffer, response_header);
+	sprintf((buffer + strlen(buffer)), "\n===========================================================\n");
+	log(buffer, 0);
 }
 
-void prepare_response_header_state(char* response_header)
+/******************************************************************************
+		build_response_header_state: Constructs the HTTP status (200 OK, 404
+	NOT FOUND, etc.) portion of the server HTTP response header.
+******************************************************************************/
+void build_response_header_state(char* response_header)
 {
 	// Determine HTTP response state of requested file.
-	if (200 == response_state)
+	if (OK == server.response_state)
 	{
 		strcat(response_header, HTTP_200_OK);
 	}
-	else if (404 == response_state)
+	else if (NOTFOUND == server.response_state)
 	{
 		strcat(response_header, HTTP_404_NOTFOUND);
 	}
 	//
 }
 
-void prepare_response_header_content(struct stat* file_stat, const char* content_type, char* response_header)
+/******************************************************************************
+		build_response_header_content: Constructs the Content fields of the
+	server HTTP response header (Content-Type, Content-Length, etc.).
+******************************************************************************/
+void build_response_header_content(struct stat* file_stat, const char* content_type, char* response_header)
 {
 	char file_size[16];
+
+	memset(file_size, 0, sizeof(file_size));
 
 	strcat(response_header, "Content-Type: ");
 
@@ -392,6 +580,13 @@ void prepare_response_header_content(struct stat* file_stat, const char* content
 	}
 	//
 
+	// Content-Type: audio/webm
+	else if (0 == strcmp(CONTENT_AUDIO_WEBM, content_type))
+	{
+		strcat(response_header, CONTENT_AUDIO_WEBM);
+	}
+	//
+
 	// Content-Tye: audio/ogg
 	else if (0 == strcmp(CONTENT_AUDIO_OGG, content_type))
 	{
@@ -406,13 +601,67 @@ void prepare_response_header_content(struct stat* file_stat, const char* content
 	}
 	//
 
+	// Content-Type: video/ogg
+	else if (0 == strcmp(CONTENT_VIDEO_OGG, content_type))
+	{
+		strcat(response_header, CONTENT_VIDEO_OGG);
+	}
+	//
+
 	// Content-Type: */*
 	else
 	{
 		strcat(response_header, CONTENT_ANY);
 	}
+	//
 
 	sprintf(file_size, "%d", file_stat->st_size);
 	strcat(response_header, "\nContent-Length: ");
 	strcat(response_header, file_size);
+}
+
+/******************************************************************************
+		server_information: Constructs a string describing server program meta-
+	data (name, version, etc.).
+******************************************************************************/
+void server_information(char* information)
+{
+	strcat(information, BD3WS_ServerName);
+	strcat(information, " ");
+	strcat(information, BD3WS_ServerVersion);
+}
+
+/******************************************************************************
+		log: Logs server activity in the system log file.
+******************************************************************************/
+void log(const char* message, int error)
+{
+	pthread_mutex_lock(&mutex_log);
+
+	// Ensure that the log file is open.
+	if (NULL == log_handle)
+	{
+		log_handle = fopen(BD3WS_Log, "w");
+	}
+	//
+
+	// Determine if writing to stdout or stderr.
+	if (0 == error)
+	{
+		fprintf(stdout, "%s", message);
+		fflush(stdout);
+	}
+	else if(1 == error)
+	{
+		fprintf(stderr, "%s", message);
+		fflush(stderr);
+	}
+	//
+
+	// Write to log file.
+	fprintf(log_handle, "%s", message);
+	fflush(log_handle);
+	//
+
+	pthread_mutex_unlock(&mutex_log);
 }
