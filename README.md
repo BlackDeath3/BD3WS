@@ -1,4 +1,4 @@
 BD3WS
 =====
 
-A simple web server.
+A simple multithreaded web server written in C.
