@@ -1,3 +1,7 @@
+# 		This compiles and conditionally runs the BD3WS program.  It also allows
+#	for specification of the "-d" command-line argument which will run BD3WS
+#	with gdb attached.
+
 #!/bin/bash
 
 # Attempt compilation.
